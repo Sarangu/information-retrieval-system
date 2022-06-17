@@ -1,0 +1,184 @@
+#!/usr/bin/python3
+
+from googleapiclient.discovery import build
+import sys
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+from nltk.corpus import stopwords
+
+
+API_KEY="AIzaSyC3gsw3bEoyTWHBk2akQ2uLP4IkeuyE_zg"
+ENGINE_ID="31a218a86791fb76c"
+
+
+def sort_vocab(docs):
+    """
+    Returns a sorted list of vocabulary words based on tf-idf
+    :param docs:
+    :return:
+    """
+    stop_words = stopwords.words('english')
+    vectorizer = TfidfVectorizer(stop_words=stop_words)
+    X = vectorizer.fit_transform(docs)
+    vocabulary = vectorizer.get_feature_names()
+    X = X.toarray()
+    sum_array = np.sum(X, axis = 0)
+    vocab_tfidf_dict = dict()
+
+    for word_ind in range(len(vocabulary)):
+        vocab_tfidf_dict[vocabulary[word_ind]] = sum_array[word_ind]
+    sorted_vocab = sorted(vocab_tfidf_dict.keys(), key=lambda item: vocab_tfidf_dict[item])[::-1]
+    return sorted_vocab
+
+
+def get_new_query(query, docs):
+    """
+    Creates the new search query
+    :param query: query to augment
+    :param docs: all relevant docs list
+    :return: augmented query
+    """
+    sorted_vocab = sort_vocab(docs)
+
+    query_set = set(query.split())
+    freq_dict = dict()
+    for word in query.split():
+        freq_dict[word] = freq_dict.get(word, 0) + 1
+
+    new_words_counter = 0
+    augmented_query_words = []
+    new_words = []
+    for word in sorted_vocab:
+        if len(query_set) == 0 and new_words_counter == 2:
+            break
+        if word in query_set:
+            augmented_query_words.extend([word] * freq_dict[word])
+            query_set.remove(word)
+        elif new_words_counter < 2:
+            freq_dict[word] = 1
+            new_words.append(word)
+            augmented_query_words.append(word)
+            new_words_counter += 1
+
+    augmented_query = " ".join(augmented_query_words)
+    return augmented_query, new_words
+
+
+def pretty_print(item):
+    """
+    Prints details in an ordered format
+    :param item:
+    :return:
+    """
+    doc_info = "[\n"
+    doc_info += f"    URL: {item['URL']}\n"
+    doc_info += f"    Title: {item['Title']}\n"
+    doc_info += f"    Summary: {item['Summary'].strip()}\n"
+    doc_info += "]\n"
+    print(doc_info)
+
+
+def search_google(query, api_key=API_KEY, engine_id=ENGINE_ID, desired_precision=0.9):
+    """
+    Searches query using google custom search api until desired precision is reached
+    :param query:
+    :param api_key:
+    :param engine_id:
+    :param desired_precision:
+    :return:
+    """
+    service = build("customsearch", "v1",
+                    developerKey=api_key)
+
+    current_precision = 0
+    iteration = 1
+    while current_precision < desired_precision:
+        print(f"Parameters:")
+        print(f"Client key = {api_key}")
+        print(f"Engine key = {engine_id}")
+        print(f"Query = {query}")
+        print(f"Precision = {desired_precision}")
+
+        # make api call
+        response = service.cse().list(q=query, cx=engine_id).execute()
+        results = response['items']
+
+        if iteration == 1 and len(results) < 10:
+            print(f"Got less than 10 results in first iteration. Exiting...")
+            return
+
+        print(f"Google Search Results:")
+        print("======================")
+
+        relevant_docs_count = 0
+        html_docs_count = 0
+        relevant_docs = []
+
+        for index, item in enumerate(results):
+            parsed_item = {
+                'Title': item['title'],
+                'URL': item['formattedUrl'],
+                'Summary': item['snippet'] if 'snippet' in item else ''
+            }
+
+            print(f"Result {index + 1}")
+            pretty_print(parsed_item)
+
+            val = input("Relevant (Y/N)? ")
+            while val != 'Y' and val != 'N':
+                print("Invalid Input")
+                val = input("Relevant (Y/N)? ")
+
+            # consider only html docs otherwise ignore user input
+            if "fileFormat" not in item:
+                html_docs_count += 1
+                if val == "Y":
+                    relevant_docs_count += 1
+                    if 'snippet' in item:
+                        if 'title' in item:
+                            relevant_docs.append(item['snippet'] + item['title'])
+                        else:
+                            relevant_docs.append(item['snippet'])
+
+        current_precision = relevant_docs_count / html_docs_count
+
+        print("=====================")
+        print("FEEDBACK SUMMARY")
+        print(f"Query = {query}")
+        print(f"Precision = {current_precision}")
+
+        if current_precision == 0:
+            print(f"No relevant docs returned. Exiting with 0 precision.")
+            return
+        elif current_precision < desired_precision:
+            print(f"Still below the desired precision of {desired_precision}")
+            print("Indexing results...")
+
+            # augment query
+            query, new_words = get_new_query(query, relevant_docs)
+            new_words = " ".join(new_words)
+            print(f"Augmenting by {new_words}")
+        else:
+            print("Desired precision reached, done.")
+
+        iteration += 1
+
+
+def main():
+    if len(sys.argv) < 5:
+        print(f"Incorrect Usage: {sys.argv[0]} <google api key> <google engine id> <precision> <query>")
+        return
+
+    api_key = sys.argv[1]
+    engine_id = sys.argv[2]
+    query = sys.argv[4]
+    desired_precision = float(sys.argv[3])
+    if desired_precision < 0 or desired_precision > 1:
+        print(f"Precision should be between 0 and 1.")
+        return
+
+    search_google(query, api_key, engine_id, desired_precision)
+
+
+if __name__ == "__main__":
+    main()
